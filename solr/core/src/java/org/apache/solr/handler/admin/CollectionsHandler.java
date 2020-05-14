@@ -1428,7 +1428,7 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
                     replica.getCoreUrl(), state);
               }
               if (!n.contains(replica.getNodeName())
-                  || !state.equals(Replica.State.ACTIVE.toString())) {
+                  /* || !state.equals(Replica.State.ACTIVE.toString()) */) {
                 replicaNotAliveCnt++;
                 return false;
               }

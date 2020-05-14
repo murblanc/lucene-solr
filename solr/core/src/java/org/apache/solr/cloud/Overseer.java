@@ -21,6 +21,9 @@ import static org.apache.solr.common.params.CommonParams.ID;
 import java.io.Closeable;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
@@ -54,6 +57,7 @@ import org.apache.solr.common.SolrException;
 import org.apache.solr.common.cloud.ClusterState;
 import org.apache.solr.common.cloud.ConnectionManager;
 import org.apache.solr.common.cloud.DocCollection;
+import org.apache.solr.common.cloud.Replica;
 import org.apache.solr.common.cloud.Slice;
 import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.solr.common.cloud.ZkNodeProps;
@@ -119,6 +123,9 @@ public class Overseer implements SolrCloseable {
 
     private boolean isClosed = false;
 
+
+    private long lastLog = 0l;
+
     public ClusterStateUpdater(final ZkStateReader reader, final String myId, Stats zkStats) {
       this.zkClient = reader.getZkClient();
       this.zkStats = zkStats;
@@ -137,6 +144,45 @@ public class Overseer implements SolrCloseable {
 
     public Stats getWorkQueueStats()  {
       return workQueue.getZkStats();
+    }
+
+    private void logCollectionsMemory(ClusterState clusterState) {
+      if (System.currentTimeMillis() - lastLog < 10 * 1000l) return;
+
+      lastLog = System.currentTimeMillis();
+
+      // Get current size of heap in bytes
+      long heapSize = Runtime.getRuntime().totalMemory();
+
+      // Get maximum size of heap in bytes. The heap cannot grow beyond this size.// Any attempt will result in an OutOfMemoryException.
+      long heapMaxSize = Runtime.getRuntime().maxMemory();
+
+      // Get amount of free memory within the heap in bytes. This size will increase // after garbage collection and decrease as new objects are created.
+      long heapFreeSize = Runtime.getRuntime().freeMemory();
+
+      Map<String, DocCollection> collmap = clusterState.getCollectionsMap();
+
+      int numCollections = collmap.size();
+
+      int replicaCount = 0;
+      int shardCount = 0;
+      for (DocCollection c : collmap.values()) {
+        for (Slice s :  c.getSlices()) {
+          shardCount++;
+          for (Replica r : s.getReplicas()) {
+            replicaCount++;
+          }
+        }
+      }
+
+      String output = lastLog + ", " + numCollections + ", " + shardCount + ", " + replicaCount + ", "  + heapSize + ", " + (heapSize - heapFreeSize) + ", " + heapFreeSize + ", " + heapMaxSize + ", " + (System.currentTimeMillis() - lastLog) + "ms\n";
+
+      try {
+        Files.write(Paths.get("/Users/iginzburg/Documents/collectionsMemory.txt"), output.getBytes(), StandardOpenOption.APPEND, StandardOpenOption.CREATE);
+      } catch (IOException e) {
+        System.out.println(e);
+      }
+
     }
 
     @Override
@@ -221,6 +267,14 @@ public class Overseer implements SolrCloseable {
               continue;
             }
           }
+
+
+
+
+          logCollectionsMemory(clusterState);
+
+
+
 
           LinkedList<Pair<String, byte[]>> queue = null;
           try {

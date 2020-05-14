@@ -21,6 +21,9 @@ package org.apache.solr.client.solrj.cloud.autoscaling;
 import java.io.IOException;
 import java.io.StringWriter;
 import java.lang.invoke.MethodHandles;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -88,6 +91,8 @@ public class PolicyHelper {
                                                           int tlogReplicas,
                                                           int pullReplicas,
                                                           List<String> nodesList) {
+    long time_start = System.currentTimeMillis();
+
     List<ReplicaPosition> positions = new ArrayList<>();
     ThreadLocal<Map<String, String>> policyMapping = getPolicyMapping(cloudManager);
     ClusterStateProvider stateProvider = new DelegatingClusterStateProvider(cloudManager.getClusterStateProvider()) {
@@ -119,6 +124,7 @@ public class PolicyHelper {
       }
     };
 
+    long time_gotSession;
     policyMapping.set(optionalPolicyMapping);
     SessionWrapper sessionWrapper = null;
     Policy.Session origSession = null;
@@ -129,6 +135,9 @@ public class PolicyHelper {
         throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "unable to get autoscaling policy session", e);
 
       }
+
+      time_gotSession = System.currentTimeMillis();
+
       origSession = sessionWrapper.session;
       // new session needs to be created to avoid side-effects from per-collection policies
       Policy.Session session = new Policy.Session(delegatingManager, origSession.policy, origSession.transaction);
@@ -156,6 +165,7 @@ public class PolicyHelper {
         log.warn("Exception while reading disk free metric values for nodes to be used for collection: {}", collName, e);
       }
 
+      long time_copiedetc = System.currentTimeMillis();
 
       Map<Replica.Type, Integer> typeVsCount = new EnumMap<>(Replica.Type.class);
       typeVsCount.put(Replica.Type.NRT, nrtReplicas);
@@ -192,6 +202,17 @@ public class PolicyHelper {
           }
         }
       }
+
+      long time_computed = System.currentTimeMillis();
+
+      String output = "Got session " + (time_gotSession-time_start) + ", copied session " + (time_copiedetc-time_start) +
+          ", done computing " + (time_computed-time_start) + "\n";
+      try {
+        Files.write(Paths.get("/Users/iginzburg/Documents/autoscaleGetReplicaLocations.txt"), output.getBytes(), StandardOpenOption.APPEND, StandardOpenOption.CREATE);
+      } catch (IOException e) {
+        System.out.println(e);
+      }
+
     } finally {
       policyMapping.remove();
       if (sessionWrapper != null) {
@@ -455,8 +476,12 @@ public class PolicyHelper {
 
 
     public SessionWrapper get(SolrCloudManager cloudManager) throws IOException, InterruptedException {
+      long time_methodEntry = System.currentTimeMillis();
+      long time_gotLock = 0l;
       TimeSource timeSource = cloudManager.getTimeSource();
       synchronized (lockObj) {
+        time_gotLock = System.currentTimeMillis();
+
         if (sessionWrapper.status == Status.NULL ||
             sessionWrapper.zkVersion != cloudManager.getDistribStateManager().getAutoScalingConfig().getZkVersion() ||
             TimeUnit.SECONDS.convert(timeSource.getTimeNs() - sessionWrapper.lastUpdateTime, TimeUnit.NANOSECONDS) > SESSION_EXPIRY) {
@@ -499,13 +524,29 @@ public class PolicyHelper {
     }
 
     private SessionWrapper createSession(SolrCloudManager cloudManager) throws InterruptedException, IOException {
-      synchronized (lockObj) {
-        log.debug("Creating a new session");
-        Policy.Session session = cloudManager.getDistribStateManager().getAutoScalingConfig().getPolicy().createSession(cloudManager);
-        log.debug("New session created ");
-        this.sessionWrapper = new SessionWrapper(session, this);
-        this.sessionWrapper.status = Status.COMPUTING;
-        return sessionWrapper;
+      long time_methodEntry = System.currentTimeMillis();
+      long time_gotLock = 0l;
+      try {
+        synchronized (lockObj) {
+          time_gotLock = System.currentTimeMillis();
+          log.debug("Creating a new session");
+          Policy.Session session = cloudManager.getDistribStateManager().getAutoScalingConfig().getPolicy().createSession(cloudManager);
+          log.debug("New session created ");
+          this.sessionWrapper = new SessionWrapper(session, this);
+          this.sessionWrapper.status = Status.COMPUTING;
+          return sessionWrapper;
+        }
+      } finally {
+        long time_end = System.currentTimeMillis();
+
+        String output = "PolicyHelper.createSession() time to get lock " + (time_gotLock-time_methodEntry) + ", time to get session from entry " + (time_end-time_methodEntry) +
+            ", time to get session after got lock " + (time_end-time_gotLock) + ".\n";
+        try {
+          Files.write(Paths.get("/Users/iginzburg/Documents/sessionCreationTiming.txt"), output.getBytes(), StandardOpenOption.APPEND, StandardOpenOption.CREATE);
+        } catch (IOException e) {
+          System.out.println(e);
+        }
+
       }
     }
 

@@ -20,11 +20,15 @@ package org.apache.solr.cloud.api.collections;
 
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
@@ -104,6 +108,8 @@ public class CreateCollectionCmd implements OverseerCollectionMessageHandler.Cmd
 
   @Override
   public void call(ClusterState clusterState, ZkNodeProps message, NamedList results) throws Exception {
+    long time_start = System.currentTimeMillis();
+
     if (ocmh.zkStateReader.aliasesManager != null) { // not a mock ZkStateReader
       ocmh.zkStateReader.aliasesManager.update();
     }
@@ -168,33 +174,56 @@ public class CreateCollectionCmd implements OverseerCollectionMessageHandler.Cmd
       }
 
       createCollectionZkNode(stateManager, collectionName, collectionParams);
-      
+
+      long time_createdNode = System.currentTimeMillis();
+
+      long offering = System.currentTimeMillis();
       ocmh.overseer.offerStateUpdate(Utils.toJSON(message));
 
       // wait for a while until we see the collection
       TimeOut waitUntil = new TimeOut(30, TimeUnit.SECONDS, timeSource);
       boolean created = false;
-      while (! waitUntil.hasTimedOut()) {
+      boolean timeOut;
+      while (! (timeOut = waitUntil.hasTimedOut())) {
         waitUntil.sleep(100);
         created = ocmh.cloudManager.getClusterStateProvider().getClusterState().hasCollection(collectionName);
         if(created) break;
       }
+
+      offering = System.currentTimeMillis() - offering;
+      String output = "Creating collection " + collectionName + " state change took " + offering + "ms. created=" + created + ", timed out waiting=" + timeOut + ".\n";
+      try {
+        Files.write(Paths.get("/Users/iginzburg/Documents/CollectionCreateCmdLog.txt"), output.getBytes(), StandardOpenOption.APPEND, StandardOpenOption.CREATE);
+      } catch (IOException e) {
+        System.out.println(e);
+      }
+
+
       if (!created) {
         throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Could not fully create collection: " + collectionName);
       }
 
+      long time_zkCreated = System.currentTimeMillis();
+
       // refresh cluster state
       clusterState = ocmh.cloudManager.getClusterStateProvider().getClusterState();
 
+
+      long time_gotClusterState = System.currentTimeMillis();
+
       List<ReplicaPosition> replicaPositions = null;
       try {
-        replicaPositions = buildReplicaPositions(ocmh.cloudManager, clusterState, clusterState.getCollection(collectionName), message, shardNames, sessionWrapper);
+        replicaPositions = new LinkedList<>();
+        replicaPositions.add(new ReplicaPosition(shardNames.get(0), 1, Replica.Type.NRT, "localhost:8983_solr"));
+//        replicaPositions = buildReplicaPositions(ocmh.cloudManager, clusterState, clusterState.getCollection(collectionName), message, shardNames, sessionWrapper);
       } catch (Assign.AssignmentException e) {
         ZkNodeProps deleteMessage = new ZkNodeProps("name", collectionName);
         new DeleteCollectionCmd(ocmh).call(clusterState, deleteMessage, results);
         // unwrap the exception
         throw new SolrException(ErrorCode.BAD_REQUEST, e.getMessage(), e.getCause());
       }
+
+      long time_builtReplicaPositions = System.currentTimeMillis();
 
       if (replicaPositions.isEmpty()) {
         log.debug("Finished create command for collection: {}", collectionName);
@@ -286,37 +315,42 @@ public class CreateCollectionCmd implements OverseerCollectionMessageHandler.Cmd
         }
       }
 
+
       if(!isLegacyCloud) {
         // wait for all replica entries to be created
         Map<String, Replica> replicas = ocmh.waitToSeeReplicasInState(collectionName, coresToCreate.keySet());
         for (Map.Entry<String, ShardRequest> e : coresToCreate.entrySet()) {
           ShardRequest sreq = e.getValue();
           sreq.params.set(CoreAdminParams.CORE_NODE_NAME, replicas.get(e.getKey()).getName());
-          shardHandler.submit(sreq, sreq.shards[0], sreq.params);
+// IG do not send requests to nodes, so nothing is created...
+//          shardHandler.submit(sreq, sreq.shards[0], sreq.params);
         }
       }
 
-      shardRequestTracker.processResponses(results, shardHandler, false, null, Collections.emptySet());
-      boolean failure = results.get("failure") != null && ((SimpleOrderedMap)results.get("failure")).size() > 0;
-      if (failure) {
-        // Let's cleanup as we hit an exception
-        // We shouldn't be passing 'results' here for the cleanup as the response would then contain 'success'
-        // element, which may be interpreted by the user as a positive ack
-        ocmh.cleanupCollection(collectionName, new NamedList<Object>());
-        log.info("Cleaned up artifacts for failed create collection for [{}]", collectionName);
-        throw new SolrException(ErrorCode.BAD_REQUEST, "Underlying core creation failed while creating collection: " + collectionName);
-      } else {
-        log.debug("Finished create command on all shards for collection: {}", collectionName);
+      long time_finishedReplicaZKupdates = System.currentTimeMillis();
 
-        // Emit a warning about production use of data driven functionality
-        boolean defaultConfigSetUsed = message.getStr(COLL_CONF) == null ||
-            message.getStr(COLL_CONF).equals(ConfigSetsHandlerApi.DEFAULT_CONFIGSET_NAME);
-        if (defaultConfigSetUsed) {
-          results.add("warning", "Using _default configset. Data driven schema functionality"
-              + " is enabled by default, which is NOT RECOMMENDED for production use. To turn it off:"
-              + " curl http://{host:port}/solr/" + collectionName + "/config -d '{\"set-user-property\": {\"update.autoCreateFields\":\"false\"}}'");
-        }
-      }
+// IG did not send requests so do not expect to process responses :)
+//      shardRequestTracker.processResponses(results, shardHandler, false, null, Collections.emptySet());
+//      boolean failure = results.get("failure") != null && ((SimpleOrderedMap)results.get("failure")).size() > 0;
+//      if (failure) {
+//        // Let's cleanup as we hit an exception
+//        // We shouldn't be passing 'results' here for the cleanup as the response would then contain 'success'
+//        // element, which may be interpreted by the user as a positive ack
+//        ocmh.cleanupCollection(collectionName, new NamedList<Object>());
+//        log.info("Cleaned up artifacts for failed create collection for [{}]", collectionName);
+//        throw new SolrException(ErrorCode.BAD_REQUEST, "Underlying core creation failed while creating collection: " + collectionName);
+//      } else {
+//        log.debug("Finished create command on all shards for collection: {}", collectionName);
+//
+//        // Emit a warning about production use of data driven functionality
+//        boolean defaultConfigSetUsed = message.getStr(COLL_CONF) == null ||
+//            message.getStr(COLL_CONF).equals(ConfigSetsHandlerApi.DEFAULT_CONFIGSET_NAME);
+//        if (defaultConfigSetUsed) {
+//          results.add("warning", "Using _default configset. Data driven schema functionality"
+//              + " is enabled by default, which is NOT RECOMMENDED for production use. To turn it off:"
+//              + " curl http://{host:port}/solr/" + collectionName + "/config -d '{\"set-user-property\": {\"update.autoCreateFields\":\"false\"}}'");
+//        }
+//      }
 
       // modify the `withCollection` and store this new collection's name with it
       if (withCollection != null) {
@@ -337,6 +371,19 @@ public class CreateCollectionCmd implements OverseerCollectionMessageHandler.Cmd
       // create an alias pointing to the new collection, if different from the collectionName
       if (!alias.equals(collectionName)) {
         ocmh.zkStateReader.aliasesManager.applyModificationAndExportToZk(a -> a.cloneWithCollectionAlias(alias, collectionName));
+      }
+
+      long time_end = System.currentTimeMillis();
+
+
+
+      output = "Created coll ZK node " + (time_createdNode-time_start) + ", observed state update " + (time_zkCreated-time_start) +
+          ", built replica positions " + (time_builtReplicaPositions-time_start) + ", saw replica zk change " + (time_finishedReplicaZKupdates-time_start) +
+          ", command done " + (time_end-time_start) + ".\n";
+      try {
+        Files.write(Paths.get("/Users/iginzburg/Documents/creationCommandTiming.txt"), output.getBytes(), StandardOpenOption.APPEND, StandardOpenOption.CREATE);
+      } catch (IOException e) {
+        System.out.println(e);
       }
 
     } catch (SolrException ex) {
