@@ -263,7 +263,7 @@ public class AddReplicaCmd implements OverseerCollectionMessageHandler.Cmd {
     if (createReplica.coreNodeName != null) {
       params.set(CoreAdminParams.CORE_NODE_NAME, createReplica.coreNodeName);
     }
-    ocmh.addPropertyParams(message, params);
+    OverseerCollectionMessageHandler.addPropertyParams(message, params);
 
     return params;
   }

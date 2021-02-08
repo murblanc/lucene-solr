@@ -30,6 +30,7 @@ import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.solr.api.Api;
 import org.apache.solr.client.solrj.SolrResponse;
+import org.apache.solr.client.solrj.cloud.SolrCloudManager;
 import org.apache.solr.client.solrj.impl.HttpSolrClient;
 import org.apache.solr.client.solrj.impl.HttpSolrClient.Builder;
 import org.apache.solr.client.solrj.request.CollectionAdminRequest;
@@ -44,8 +45,7 @@ import org.apache.solr.cloud.OverseerTaskQueue.QueueEvent;
 import org.apache.solr.cloud.ZkController;
 import org.apache.solr.cloud.ZkController.NotInClusterStateException;
 import org.apache.solr.cloud.ZkShardTerms;
-import org.apache.solr.cloud.api.collections.ReindexCollectionCmd;
-import org.apache.solr.cloud.api.collections.RoutedAlias;
+import org.apache.solr.cloud.api.collections.*;
 import org.apache.solr.cloud.overseer.SliceMutator;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
@@ -79,6 +79,7 @@ import org.apache.solr.core.backup.repository.BackupRepository;
 import org.apache.solr.core.snapshots.CollectionSnapshotMetaData;
 import org.apache.solr.core.snapshots.SolrSnapshotManager;
 import org.apache.solr.handler.RequestHandlerBase;
+import org.apache.solr.handler.component.ShardHandler;
 import org.apache.solr.logging.MDCLoggingContext;
 import org.apache.solr.request.LocalSolrQueryRequest;
 import org.apache.solr.request.SolrQueryRequest;
@@ -156,6 +157,9 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
   private final CollectionHandlerApi v2Handler;
   private final DistributedClusterChangeUpdater distributedClusterChangeUpdater;
 
+  // TODO need clsuter config to activate distribution of Collection API that will also do distributed cluster state update...
+  private boolean activate_PoC_distributed_creation = true;
+
   public CollectionsHandler() {
     // Unlike most request handlers, CoreContainer initialization
     // should happen in the constructor...
@@ -232,8 +236,8 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
       }
       CollectionOperation operation = CollectionOperation.get(action);
       if (log.isDebugEnabled()) {
-        log.debug("Invoked Collection Action :{} with params {} and sendToOCPQueue={}"
-            , action.toLower(), req.getParamString(), operation.sendToOCPQueue);
+        log.debug("Invoked Collection Action :{} with params {}"
+            , action.toLower(), req.getParamString());
       }
       MDCLoggingContext.setCollection(req.getParams().get(COLLECTION));
       invokeAction(req, rsp, cores, action, operation);
@@ -258,6 +262,65 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
     return cores;
   }
 
+  /**
+   * This is PoC material. Trying to understand how distributing Collection API calls to nodes can work.
+   *
+   * When invokeAction() does not enqueue to overseer queue and instead calls this method, this method
+   * is expected to do the equivalent of what Overseer does in OverseerCollectionMessageHandler.processMessage,
+   * calling CreateCollectionCmd.call() after setting the logging context.
+   *
+   * The steps leading to that call are:
+   * - OverseerTaskProcessor.run() gets the message from the ZK queue, grabs the corresponding lock (Collection API
+   * calls do locking to prevent non compatible concurrent modifications of a collection), marks the async id of the
+   * task as running then executes the command using an executor service
+   * - In OverseerTaskProcessor.Runner.run() (run on an executor thread) a call is made to
+   * OverseerCollectionMessageHandler.processMessage() which sets the logging context and for as far as this PoC
+   * is concerned, calls CreateCollectionCmd.call().
+   */
+  OverseerSolrResponse distributedCollectionCreation(ZkNodeProps message, String operation) {
+    // We skip everything that is Overseer based...
+    assert distributedClusterChangeUpdater.isDistributedStateChange();
+
+    ShardHandler shardHandler = coreContainer.getShardHandlerFactory().getShardHandler();
+    SolrCloudManager solrCloudManager = coreContainer.getZkController().getSolrCloudManager();
+    ZkStateReader zkStateReader = coreContainer.getZkController().getZkStateReader();
+    DistributedClusterChangeUpdater distributedClusterChangeUpdater = this.distributedClusterChangeUpdater;
+    CoreContainer coreContainer = this.coreContainer;
+
+    DistributedCollectionCommandContext dccc = new DistributedCollectionCommandContext(shardHandler,
+        solrCloudManager, coreContainer, zkStateReader, distributedClusterChangeUpdater);
+
+    // This is PoC. Skip the locking thing and call the command directly.
+    // TODO locking between commands for same collection (impact on distributed cluster state update!)
+    // TODO get the right command, see OCMH.processMessage()
+    CreateCollectionCmd cmd = new CreateCollectionCmd(dccc);
+
+    NamedList<Object> results = new NamedList<>();
+    // We use this node's cluster state. It might not be up to date (the same could happen to Overseer node Collection API
+    // state though), so need to understand if any difference here.
+    try {
+      cmd.call(zkStateReader.getClusterState(), message, results);
+    } catch (Exception e) {
+      String collName = message.getStr("collection");
+      if (collName == null) collName = message.getStr(NAME);
+
+      if (collName == null) {
+        SolrException.log(log, "Operation " + operation + " failed", e);
+      } else  {
+        SolrException.log(log, "Collection: " + collName + " operation: " + operation
+            + " failed", e);
+      }
+
+      results.add("Operation " + operation + " caused exception:", e);
+      SimpleOrderedMap<Object> nl = new SimpleOrderedMap<>();
+      nl.add("msg", e.getMessage());
+      nl.add("rspCode", e instanceof SolrException ? ((SolrException)e).code() : -1);
+      results.add("exception", nl);
+    }
+    return new OverseerSolrResponse(results);
+
+  }
+
   @SuppressWarnings({"unchecked"})
   void invokeAction(SolrQueryRequest req, SolrQueryResponse rsp, CoreContainer cores, CollectionAction action, CollectionOperation operation) throws Exception {
     if (!coreContainer.isZooKeeperAware()) {
@@ -276,36 +339,35 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
 
     props.put(QUEUE_OPERATION, operation.action.toLower());
 
-    if (operation.sendToOCPQueue) {
-      ZkNodeProps zkProps = new ZkNodeProps(props);
-      SolrResponse overseerResponse = sendToOCPQueue(zkProps, operation.timeOut);
-      rsp.getValues().addAll(overseerResponse.getResponse());
-      Exception exp = overseerResponse.getException();
-      if (exp != null) {
-        rsp.setException(exp);
-      }
+    ZkNodeProps zkProps = new ZkNodeProps(props);
+    final SolrResponse overseerResponse;
 
-      // Even if Overseer does wait for the collection to be created, it sees a different cluster state than this node,
-      // so this wait is required to make sure the local node Zookeeper watches fired and now see the collection.
-      if (action.equals(CollectionAction.CREATE) && asyncId == null) {
-        if (rsp.getException() == null) {
-          waitForActiveCollection(zkProps.getStr(NAME), cores, overseerResponse);
-        }
-      }
+    // We deal with a Collection API message. It is either sent to Overseer or processed locally. It is never a cluster state
+    // change message. Those are generated later when the Collection API commands are actually executed.
 
+    if (activate_PoC_distributed_creation && operation == CollectionOperation.CREATE_OP && distributedClusterChangeUpdater.isDistributedStateChange()) {
+      log.info("Running locally without going through Overseer operation " + operation.name()); // nowarn
+      overseerResponse = distributedCollectionCreation(zkProps, operation.action.toLower());
     } else {
-      if (distributedClusterChangeUpdater.isDistributedStateChange()) {
-        DistributedClusterChangeUpdater.MutatingCommand command = DistributedClusterChangeUpdater.MutatingCommand.getCommandFor(operation.action);
-        ZkNodeProps message = new ZkNodeProps(props);
-        // We do the state change synchronously but do not wait for it to be visible in this node's cluster state updated via ZK watches
-        distributedClusterChangeUpdater.doSingleStateUpdate(command, message,
-            coreContainer.getZkController().getSolrCloudManager(), coreContainer.getZkController().getZkStateReader());
-      } else {
-        // submits and doesn't wait for anything (no response)
-        coreContainer.getZkController().getOverseer().offerStateUpdate(Utils.toJSON(props));
-      }
+      overseerResponse = sendToOCPQueue(zkProps, operation.timeOut);
     }
 
+
+    // Wait until we see the collection
+    // TODO: this might change for distributed collection API operation if the local cache is updated with the values just written and there are no watches to wait for
+    rsp.getValues().addAll(overseerResponse.getResponse());
+    Exception exp = overseerResponse.getException();
+    if (exp != null) {
+      rsp.setException(exp);
+    }
+
+    // Even if Overseer does wait for the collection to be created, it sees a different cluster state than this node,
+    // so this wait is required to make sure the local node Zookeeper watches fired and now see the collection.
+    if (action.equals(CollectionAction.CREATE) && asyncId == null) {
+      if (rsp.getException() == null) {
+        waitForActiveCollection(zkProps.getStr(NAME), cores, overseerResponse);
+      }
+    }
   }
 
 
@@ -716,7 +778,7 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
       }
       return null;
     }),
-    SPLITSHARD_OP(SPLITSHARD, DEFAULT_COLLECTION_OP_TIMEOUT * 5, true, (req, rsp, h) -> {
+    SPLITSHARD_OP(SPLITSHARD, DEFAULT_COLLECTION_OP_TIMEOUT * 5, (req, rsp, h) -> {
       String name = req.getParams().required().get(COLLECTION_PROP);
       // TODO : add support for multiple shards
       String shard = req.getParams().get(SHARD_ID_PROP);
@@ -1272,16 +1334,14 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
     public final CollectionOp fun;
     CollectionAction action;
     long timeOut;
-    boolean sendToOCPQueue;
 
     CollectionOperation(CollectionAction action, CollectionOp fun) {
-      this(action, DEFAULT_COLLECTION_OP_TIMEOUT, true, fun);
+      this(action, DEFAULT_COLLECTION_OP_TIMEOUT, fun);
     }
 
-    CollectionOperation(CollectionAction action, long timeOut, boolean sendToOCPQueue, CollectionOp fun) {
+    CollectionOperation(CollectionAction action, long timeOut, CollectionOp fun) {
       this.action = action;
       this.timeOut = timeOut;
-      this.sendToOCPQueue = sendToOCPQueue;
       this.fun = fun;
 
     }

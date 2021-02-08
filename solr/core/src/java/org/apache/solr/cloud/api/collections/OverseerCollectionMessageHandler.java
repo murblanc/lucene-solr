@@ -80,10 +80,7 @@ import org.apache.solr.common.util.StrUtils;
 import org.apache.solr.common.util.SuppressForbidden;
 import org.apache.solr.common.util.TimeSource;
 import org.apache.solr.common.util.Utils;
-import org.apache.solr.handler.component.HttpShardHandlerFactory;
-import org.apache.solr.handler.component.ShardHandler;
-import org.apache.solr.handler.component.ShardRequest;
-import org.apache.solr.handler.component.ShardResponse;
+import org.apache.solr.handler.component.*;
 import org.apache.solr.logging.MDCLoggingContext;
 import org.apache.solr.util.RTimer;
 import org.apache.solr.util.TimeOut;
@@ -579,7 +576,7 @@ public class OverseerCollectionMessageHandler implements OverseerMessageHandler,
     }
   }
 
-  void addPropertyParams(ZkNodeProps message, ModifiableSolrParams params) {
+  static void addPropertyParams(ZkNodeProps message, ModifiableSolrParams params) {
     // Now add the property.key=value pairs
     for (String key : message.keySet()) {
       if (key.startsWith(CollectionAdminParams.PROPERTY_PREFIX)) {
@@ -664,6 +661,11 @@ public class OverseerCollectionMessageHandler implements OverseerMessageHandler,
   }
 
   Map<String, Replica> waitToSeeReplicasInState(String collectionName, Collection<String> coreNames) throws InterruptedException {
+    return waitToSeeReplicasInState(zkStateReader, timeSource, collectionName, coreNames);
+  }
+
+  // TODO Move to another class (with a lot of the static methods and classes of this file)
+  static Map<String, Replica> waitToSeeReplicasInState(ZkStateReader zkStateReader, TimeSource timeSource, String collectionName, Collection<String> coreNames) throws InterruptedException {
     assert coreNames.size() > 0;
     Map<String, Replica> result = new HashMap<>();
     TimeOut timeout = new TimeOut(Integer.getInteger("solr.waitToSeeReplicasInStateTimeoutSeconds", 120), TimeUnit.SECONDS, timeSource); // could be a big cluster
@@ -740,7 +742,7 @@ public class OverseerCollectionMessageHandler implements OverseerMessageHandler,
     ClusterState clusterState = zkStateReader.getClusterState();
     DocCollection coll = clusterState.getCollection(collectionName);
     List<Replica> notLivesReplicas = new ArrayList<>();
-    final ShardRequestTracker shardRequestTracker = new ShardRequestTracker(asyncId);
+    final ShardRequestTracker shardRequestTracker = asyncRequestTracker(asyncId);
     for (Slice slice : coll.getSlices()) {
       notLivesReplicas.addAll(shardRequestTracker.sliceCmd(clusterState, params, stateMatcher, slice, shardHandler));
     }
@@ -749,7 +751,7 @@ public class OverseerCollectionMessageHandler implements OverseerMessageHandler,
     return notLivesReplicas;
   }
 
-  private void processResponse(NamedList<Object> results, ShardResponse srsp, Set<String> okayExceptions) {
+  private static void processResponse(NamedList<Object> results, ShardResponse srsp, Set<String> okayExceptions) {
     Throwable e = srsp.getException();
     String nodeName = srsp.getNodeName();
     SolrResponse solrResponse = srsp.getSolrResponse();
@@ -759,7 +761,7 @@ public class OverseerCollectionMessageHandler implements OverseerMessageHandler,
   }
 
   @SuppressWarnings("deprecation")
-  private void processResponse(NamedList<Object> results, Throwable e, String nodeName, SolrResponse solrResponse, String shard, Set<String> okayExceptions) {
+  private static void processResponse(NamedList<Object> results, Throwable e, String nodeName, SolrResponse solrResponse, String shard, Set<String> okayExceptions) {
     String rootThrowable = null;
     if (e instanceof BaseHttpSolrClient.RemoteSolrException) {
       rootThrowable = ((BaseHttpSolrClient.RemoteSolrException) e).getRootThrowable();
@@ -793,7 +795,7 @@ public class OverseerCollectionMessageHandler implements OverseerMessageHandler,
     success.add(key, value);
   }
 
-  private NamedList<Object> waitForCoreAdminAsyncCallToComplete(String nodeName, String requestId) {
+  private static NamedList<Object> waitForCoreAdminAsyncCallToComplete(ShardHandlerFactory shardHandlerFactory, String adminPath, ZkStateReader zkStateReader, String nodeName, String requestId) {
     ShardHandler shardHandler = shardHandlerFactory.getShardHandler();
     ModifiableSolrParams params = new ModifiableSolrParams();
     params.set(CoreAdminParams.ACTION, CoreAdminAction.REQUESTSTATUS.toString());
@@ -932,19 +934,26 @@ public class OverseerCollectionMessageHandler implements OverseerMessageHandler,
   static boolean INCLUDE_TOP_LEVEL_RESPONSE = true;
 
   public ShardRequestTracker syncRequestTracker() {
-    return new ShardRequestTracker(null);
+    return asyncRequestTracker(null);
   }
 
   public ShardRequestTracker asyncRequestTracker(String asyncId) {
-    return new ShardRequestTracker(asyncId);
+    return new ShardRequestTracker(asyncId, adminPath, zkStateReader, shardHandlerFactory);
   }
 
-  public class ShardRequestTracker{
+  // TODO Move class away from this file given used in non Overseer context as well (
+  public static class ShardRequestTracker {
     private final String asyncId;
+    private final String adminPath;
+    private final ZkStateReader zkStateReader;
+    private final ShardHandlerFactory shardHandlerFactory;
     private final NamedList<String> shardAsyncIdByNode = new NamedList<String>();
 
-    private ShardRequestTracker(String asyncId) {
+    public ShardRequestTracker(String asyncId, String adminPath, ZkStateReader zkStateReader, ShardHandlerFactory shardHandlerFactory) {
       this.asyncId = asyncId;
+      this.adminPath = adminPath;
+      this.zkStateReader = zkStateReader;
+      this.shardHandlerFactory = shardHandlerFactory;
     }
 
     /**
@@ -1031,7 +1040,7 @@ public class OverseerCollectionMessageHandler implements OverseerMessageHandler,
         final String node = nodeToAsync.getKey();
         final String shardAsyncId = nodeToAsync.getValue();
         log.debug("I am Waiting for :{}/{}", node, shardAsyncId);
-        NamedList<Object> reqResult = waitForCoreAdminAsyncCallToComplete(node, shardAsyncId);
+        NamedList<Object> reqResult = waitForCoreAdminAsyncCallToComplete(shardHandlerFactory, adminPath, zkStateReader, node, shardAsyncId);
         if (INCLUDE_TOP_LEVEL_RESPONSE) {
           results.add(shardAsyncId, reqResult);
         }
