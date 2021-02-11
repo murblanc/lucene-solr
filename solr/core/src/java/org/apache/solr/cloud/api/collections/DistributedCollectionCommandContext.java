@@ -19,6 +19,7 @@ package org.apache.solr.cloud.api.collections;
 
 import org.apache.solr.client.solrj.cloud.SolrCloudManager;
 import org.apache.solr.cloud.DistributedClusterChangeUpdater;
+import org.apache.solr.common.SolrCloseable;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.cloud.ZkConfigManager;
 import org.apache.solr.common.cloud.ZkStateReader;
@@ -27,6 +28,7 @@ import org.apache.solr.handler.component.ShardHandler;
 import org.apache.zookeeper.KeeperException;
 
 import java.io.IOException;
+import java.util.concurrent.ExecutorService;
 
 public class DistributedCollectionCommandContext implements CollectionCommandContext {
   private final ShardHandler shardHandler;
@@ -63,6 +65,7 @@ public class DistributedCollectionCommandContext implements CollectionCommandCon
   }
 
   @Override
+  // TODO calls through here to get the cluster state should be reviewed
   public ZkStateReader getZkStateReader() {
     return this.zkStateReader;
   }
@@ -80,4 +83,21 @@ public class DistributedCollectionCommandContext implements CollectionCommandCon
   public DistributedClusterChangeUpdater getDistributedClusterChangeUpdater() {
     return this.distributedClusterChangeUpdater;
   }
+
+  @Override
+  public SolrCloseable getCloseableToLatchOn() {
+    return null; // TODO implement
+  }
+
+  @Override
+  public ExecutorService getExecutorService() {
+    return null; // TODO implement
+  }
+
+  @Override
+  public boolean isDistributedCollectionAPI() {
+    // If we build this instance we're running distributed.
+    return true;
+  }
+
 }

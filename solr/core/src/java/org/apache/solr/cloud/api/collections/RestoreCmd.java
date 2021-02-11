@@ -36,7 +36,7 @@ import java.util.concurrent.TimeoutException;
 
 import org.apache.solr.cloud.DistributedClusterChangeUpdater;
 import org.apache.solr.cloud.Overseer;
-import org.apache.solr.cloud.api.collections.OverseerCollectionMessageHandler.ShardRequestTracker;
+import org.apache.solr.cloud.api.collections.CollectionHandlingUtils.ShardRequestTracker;
 import org.apache.solr.cloud.overseer.OverseerAction;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
@@ -74,13 +74,13 @@ import static org.apache.solr.common.params.CollectionParams.CollectionAction.CR
 import static org.apache.solr.common.params.CommonAdminParams.ASYNC;
 import static org.apache.solr.common.params.CommonParams.NAME;
 
-public class RestoreCmd implements OverseerCollectionMessageHandler.Cmd {
+public class RestoreCmd implements CollectionHandlingUtils.Cmd {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
-  private final OverseerCollectionMessageHandler ocmh;
+  private final CollectionCommandContext ccc;
 
-  public RestoreCmd(OverseerCollectionMessageHandler ocmh) {
-    this.ocmh = ocmh;
+  public RestoreCmd(CollectionCommandContext ccc) {
+    this.ccc = ccc;
   }
 
   @Override
@@ -90,16 +90,16 @@ public class RestoreCmd implements OverseerCollectionMessageHandler.Cmd {
 
     String restoreCollectionName = message.getStr(COLLECTION_PROP);
     String backupName = message.getStr(NAME); // of backup
-    ShardHandler shardHandler = ocmh.shardHandlerFactory.getShardHandler();
+    ShardHandler shardHandler = ccc.getShardHandler();
     String asyncId = message.getStr(ASYNC);
     String repo = message.getStr(CoreAdminParams.BACKUP_REPOSITORY);
 
-    CoreContainer cc = ocmh.overseer.getCoreContainer();
+    CoreContainer cc = ccc.getCoreContainer();
     BackupRepository repository = cc.newBackupRepository(repo);
 
     URI location = repository.createURI(message.getStr(CoreAdminParams.BACKUP_LOCATION));
     URI backupPath = repository.resolve(location, backupName);
-    ZkStateReader zkStateReader = ocmh.zkStateReader;
+    ZkStateReader zkStateReader = ccc.getZkStateReader();
     BackupManager backupMgr = new BackupManager(repository, zkStateReader);
 
     Properties properties = backupMgr.readBackupProperties(location, backupName);
@@ -117,7 +117,7 @@ public class RestoreCmd implements OverseerCollectionMessageHandler.Cmd {
 
     // Get the Solr nodes to restore a collection.
     final List<String> nodeList = Assign.getLiveOrLiveAndCreateNodeSetList(
-            zkStateReader.getClusterState().getLiveNodes(), message, OverseerCollectionMessageHandler.RANDOM);
+            zkStateReader.getClusterState().getLiveNodes(), message, CollectionHandlingUtils.RANDOM);
 
     int numShards = backupCollectionState.getActiveSlices().size();
 
@@ -161,7 +161,7 @@ public class RestoreCmd implements OverseerCollectionMessageHandler.Cmd {
       propMap.put(PULL_REPLICAS, numPullReplicas);
 
       // inherit settings from input API, defaulting to the backup's setting.  Ex: replicationFactor
-      for (String collProp : OverseerCollectionMessageHandler.COLLECTION_PROPS_AND_DEFAULTS.keySet()) {
+      for (String collProp : CollectionHandlingUtils.COLLECTION_PROPS_AND_DEFAULTS.keySet()) {
         Object val = message.getProperties().getOrDefault(collProp, backupCollectionState.get(collProp));
         if (val != null && propMap.get(collProp) == null) {
           propMap.put(collProp, val);
@@ -169,7 +169,7 @@ public class RestoreCmd implements OverseerCollectionMessageHandler.Cmd {
       }
 
       propMap.put(NAME, restoreCollectionName);
-      propMap.put(OverseerCollectionMessageHandler.CREATE_NODE_SET, OverseerCollectionMessageHandler.CREATE_NODE_SET_EMPTY); //no cores
+      propMap.put(CollectionHandlingUtils.CREATE_NODE_SET, CollectionHandlingUtils.CREATE_NODE_SET_EMPTY); //no cores
       propMap.put(CollectionAdminParams.COLL_CONF, restoreConfigName);
 
       // router.*
@@ -180,9 +180,9 @@ public class RestoreCmd implements OverseerCollectionMessageHandler.Cmd {
 
       Set<String> sliceNames = backupCollectionState.getActiveSlicesMap().keySet();
       if (backupCollectionState.getRouter() instanceof ImplicitDocRouter) {
-        propMap.put(OverseerCollectionMessageHandler.SHARDS_PROP, StrUtils.join(sliceNames, ','));
+        propMap.put(CollectionHandlingUtils.SHARDS_PROP, StrUtils.join(sliceNames, ','));
       } else {
-        propMap.put(OverseerCollectionMessageHandler.NUM_SLICES, sliceNames.size());
+        propMap.put(CollectionHandlingUtils.NUM_SLICES, sliceNames.size());
         // ClusterStateMutator.createCollection detects that "slices" is in fact a slice structure instead of a
         //   list of names, and if so uses this instead of building it.  We clear the replica list.
         Collection<Slice> backupSlices = backupCollectionState.getActiveSlices();
@@ -191,10 +191,10 @@ public class RestoreCmd implements OverseerCollectionMessageHandler.Cmd {
           newSlices.put(backupSlice.getName(),
                   new Slice(backupSlice.getName(), Collections.emptyMap(), backupSlice.getProperties(), restoreCollectionName));
         }
-        propMap.put(OverseerCollectionMessageHandler.SHARDS_PROP, newSlices);
+        propMap.put(CollectionHandlingUtils.SHARDS_PROP, newSlices);
       }
 
-      ocmh.commandMap.get(CREATE).call(zkStateReader.getClusterState(), new ZkNodeProps(propMap), new NamedList());
+      new CreateCollectionCmd(ccc).call(zkStateReader.getClusterState(), new ZkNodeProps(propMap), new NamedList());
       // note: when createCollection() returns, the collection exists (no race)
     }
 
@@ -212,11 +212,11 @@ public class RestoreCmd implements OverseerCollectionMessageHandler.Cmd {
         propMap.put(shard.getName(), Slice.State.CONSTRUCTION.toString());
       }
       propMap.put(ZkStateReader.COLLECTION_PROP, restoreCollectionName);
-      if (ocmh.getDistributedClusterChangeUpdater().isDistributedStateChange()) {
-        ocmh.getDistributedClusterChangeUpdater().doSingleStateUpdate(DistributedClusterChangeUpdater.MutatingCommand.SliceUpdateShardState, new ZkNodeProps(propMap),
-            ocmh.cloudManager, ocmh.zkStateReader);
+      if (ccc.getDistributedClusterChangeUpdater().isDistributedStateChange()) {
+        ccc.getDistributedClusterChangeUpdater().doSingleStateUpdate(DistributedClusterChangeUpdater.MutatingCommand.SliceUpdateShardState, new ZkNodeProps(propMap),
+            ccc.getSolrCloudManager(), ccc.getZkStateReader());
       } else {
-        ocmh.overseer.offerStateUpdate(Utils.toJSON(new ZkNodeProps(propMap)));
+        ccc.offerStateUpdate(Utils.toJSON(new ZkNodeProps(propMap)));
       }
     }
 
@@ -236,9 +236,9 @@ public class RestoreCmd implements OverseerCollectionMessageHandler.Cmd {
             .onNodes(nodeList)
             .build();
     Assign.AssignStrategy assignStrategy = Assign.createAssignStrategy(
-        ocmh.overseer.getCoreContainer(),
+        ccc.getCoreContainer(),
         clusterState, restoreCollection);
-    List<ReplicaPosition> replicaPositions = assignStrategy.assign(ocmh.cloudManager, assignRequest);
+    List<ReplicaPosition> replicaPositions = assignStrategy.assign(ccc.getSolrCloudManager(), assignRequest);
 
     CountDownLatch countDownLatch = new CountDownLatch(restoreCollection.getSlices().size());
 
@@ -276,9 +276,9 @@ public class RestoreCmd implements OverseerCollectionMessageHandler.Cmd {
       if (asyncId != null) {
         propMap.put(ASYNC, asyncId);
       }
-      ocmh.addPropertyParams(message, propMap);
+      CollectionHandlingUtils.addPropertyParams(message, propMap);
       final NamedList addReplicaResult = new NamedList();
-      ocmh.addReplica(clusterState, new ZkNodeProps(propMap), addReplicaResult, () -> {
+      new AddReplicaCmd(ccc).addReplica(clusterState, new ZkNodeProps(propMap), addReplicaResult, () -> {
         Object addResultFailure = addReplicaResult.get("failure");
         if (addResultFailure != null) {
           SimpleOrderedMap failure = (SimpleOrderedMap) results.get("failure");
@@ -306,7 +306,7 @@ public class RestoreCmd implements OverseerCollectionMessageHandler.Cmd {
     Object failures = results.get("failure");
     if (failures != null && ((SimpleOrderedMap) failures).size() > 0) {
       log.error("Restore failed to create initial replicas.");
-      ocmh.cleanupCollection(restoreCollectionName, new NamedList<Object>());
+      CollectionHandlingUtils.cleanupCollection(restoreCollectionName, new NamedList<Object>(), ccc);
       return;
     }
 
@@ -314,7 +314,7 @@ public class RestoreCmd implements OverseerCollectionMessageHandler.Cmd {
     restoreCollection = zkStateReader.getClusterState().getCollection(restoreCollectionName);
 
     {
-      ShardRequestTracker shardRequestTracker = ocmh.asyncRequestTracker(asyncId);
+      ShardRequestTracker shardRequestTracker = CollectionHandlingUtils.asyncRequestTracker(asyncId, ccc);
       // Copy data from backed up index to each replica
       for (Slice slice : restoreCollection.getSlices()) {
         ModifiableSolrParams params = new ModifiableSolrParams();
@@ -328,7 +328,7 @@ public class RestoreCmd implements OverseerCollectionMessageHandler.Cmd {
     }
 
     {
-      ShardRequestTracker shardRequestTracker = ocmh.asyncRequestTracker(asyncId);
+      ShardRequestTracker shardRequestTracker = CollectionHandlingUtils.asyncRequestTracker(asyncId, ccc);
 
       for (Slice s : restoreCollection.getSlices()) {
         for (Replica r : s.getReplicas()) {
@@ -361,11 +361,11 @@ public class RestoreCmd implements OverseerCollectionMessageHandler.Cmd {
       for (Slice shard : restoreCollection.getSlices()) {
         propMap.put(shard.getName(), Slice.State.ACTIVE.toString());
       }
-      if (ocmh.getDistributedClusterChangeUpdater().isDistributedStateChange()) {
-        ocmh.getDistributedClusterChangeUpdater().doSingleStateUpdate(DistributedClusterChangeUpdater.MutatingCommand.SliceUpdateShardState, new ZkNodeProps(propMap),
-            ocmh.cloudManager, ocmh.zkStateReader);
+      if (ccc.getDistributedClusterChangeUpdater().isDistributedStateChange()) {
+        ccc.getDistributedClusterChangeUpdater().doSingleStateUpdate(DistributedClusterChangeUpdater.MutatingCommand.SliceUpdateShardState, new ZkNodeProps(propMap),
+            ccc.getSolrCloudManager(), ccc.getZkStateReader());
       } else {
-        ocmh.overseer.offerStateUpdate(Utils.toJSON(new ZkNodeProps(propMap)));
+        ccc.offerStateUpdate(Utils.toJSON(new ZkNodeProps(propMap)));
       }
     }
 
@@ -422,16 +422,16 @@ public class RestoreCmd implements OverseerCollectionMessageHandler.Cmd {
           if (asyncId != null) {
             propMap.put(ASYNC, asyncId);
           }
-          ocmh.addPropertyParams(message, propMap);
+          CollectionHandlingUtils.addPropertyParams(message, propMap);
 
-          ocmh.addReplica(zkStateReader.getClusterState(), new ZkNodeProps(propMap), results, null);
+          new AddReplicaCmd(ccc).addReplica(zkStateReader.getClusterState(), new ZkNodeProps(propMap), results, null);
         }
       }
     }
 
     if (backupCollectionAlias != null && !backupCollectionAlias.equals(backupCollection)) {
       log.debug("Restoring alias {} -> {}", backupCollectionAlias, backupCollection);
-      ocmh.zkStateReader.aliasesManager
+      ccc.getZkStateReader().aliasesManager
               .applyModificationAndExportToZk(a -> a.cloneWithCollectionAlias(backupCollectionAlias, backupCollection));
     }
 

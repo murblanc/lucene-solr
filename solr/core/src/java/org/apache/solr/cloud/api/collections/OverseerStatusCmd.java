@@ -36,18 +36,25 @@ import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class OverseerStatusCmd implements OverseerCollectionMessageHandler.Cmd {
+public class OverseerStatusCmd implements CollectionHandlingUtils.Cmd {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
-  private final OverseerCollectionMessageHandler ocmh;
+  private final CollectionCommandContext ccc;
 
-  public OverseerStatusCmd(OverseerCollectionMessageHandler ocmh) {
-    this.ocmh = ocmh;
+  public OverseerStatusCmd(CollectionCommandContext ccc) {
+    this.ccc = ccc;
   }
 
   @Override
   @SuppressWarnings("unchecked")
   public void call(ClusterState state, ZkNodeProps message, @SuppressWarnings({"rawtypes"})NamedList results) throws Exception {
-    ZkStateReader zkStateReader = ocmh.zkStateReader;
+    if (ccc.isDistributedCollectionAPI()) {
+      // No stats make sense when collection API is distributed, as there's no overseer...
+      // Need to decide what to do here, return empty stats, node stats or...?
+      return;
+    }
+
+    // We access Overseer specific data below. This is ok but may be refactored and abstracted in the CollectionCommandContext?
+    ZkStateReader zkStateReader = ccc.getZkStateReader();
     String leaderNode = OverseerTaskProcessor.getLeaderNode(zkStateReader.getZkClient());
     results.add("leader", leaderNode);
     Stat stat = new Stat();
@@ -64,10 +71,17 @@ public class OverseerStatusCmd implements OverseerCollectionMessageHandler.Cmd {
     // Sharing the ocmh.stats variable between the cluster state updater and the Collection API (this command) is by the way
     // about the only thing that ties the cluster state updater to the collection api message handler and that takes
     // advantage of the fact that both run on the same node (the Overseer node).
+    // EDIT: Per Replica States implementation notifying cluster state updater to reload a collection is another such dependency.
     // When distributed updates are enabled, cluster state updates are not done by the Overseer (it doesn't even see them)
     // and therefore can't report them. The corresponding data in OVERSEERSTATUS (all data built below) is no longer returned.
     // This means top level keys "overseer_operations", "collection_operations", "overseer_queue", "overseer_internal_queue"
     // and "collection_queue" are either empty or do not contain all expected information when cluster state updates are distributed.
+
+    // stats below do not make sense when cluster state updates are distributed (and if we got here it means that Collection API
+    // calls are not distributed). Return now with only collection related stats.
+    if (ccc.getDistributedClusterChangeUpdater().isDistributedStateChange()) {
+      return;
+    }
 
     @SuppressWarnings({"rawtypes"})
     NamedList overseerStats = new NamedList();
@@ -79,7 +93,7 @@ public class OverseerStatusCmd implements OverseerCollectionMessageHandler.Cmd {
     NamedList workQueueStats = new NamedList();
     @SuppressWarnings({"rawtypes"})
     NamedList collectionQueueStats = new NamedList();
-    Stats stats = ocmh.stats;
+    Stats stats = ccc.getOverseerStats();
     for (Map.Entry<String, Stats.Stat> entry : stats.getStats().entrySet()) {
       String key = entry.getKey();
       NamedList<Object> lst = new SimpleOrderedMap<>();

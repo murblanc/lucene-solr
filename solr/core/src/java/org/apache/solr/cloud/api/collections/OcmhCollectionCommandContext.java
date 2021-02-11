@@ -19,12 +19,14 @@ package org.apache.solr.cloud.api.collections;
 
 import org.apache.solr.client.solrj.cloud.SolrCloudManager;
 import org.apache.solr.cloud.DistributedClusterChangeUpdater;
+import org.apache.solr.cloud.Stats;
+import org.apache.solr.common.SolrCloseable;
 import org.apache.solr.common.cloud.ZkStateReader;
 import org.apache.solr.core.CoreContainer;
 import org.apache.solr.handler.component.ShardHandler;
 import org.apache.zookeeper.KeeperException;
 
-import java.io.IOException;
+import java.util.concurrent.ExecutorService;
 
 public class OcmhCollectionCommandContext implements CollectionCommandContext {
   private final OverseerCollectionMessageHandler ocmh;
@@ -54,11 +56,6 @@ public class OcmhCollectionCommandContext implements CollectionCommandContext {
   }
 
   @Override
-  public void validateConfigOrThrowSolrException(String configName) throws IOException, KeeperException, InterruptedException {
-    ocmh.validateConfigOrThrowSolrException(configName);
-  }
-
-  @Override
   public DistributedClusterChangeUpdater getDistributedClusterChangeUpdater() {
     return ocmh.getDistributedClusterChangeUpdater();
   }
@@ -67,4 +64,32 @@ public class OcmhCollectionCommandContext implements CollectionCommandContext {
   public void offerStateUpdate(byte[] data) throws KeeperException, InterruptedException {
     ocmh.overseer.offerStateUpdate(data);
   }
+
+  @Override
+  public SolrCloseable getCloseableToLatchOn() {
+    return ocmh;
+  }
+
+  @Override
+  public ExecutorService getExecutorService() {
+    return ocmh.tpe;
+  }
+
+  @Override
+  public boolean isDistributedCollectionAPI() {
+    // If we build this instance we're running from Overseer, so not distributed.
+    return false;
+  }
+
+  @Override
+  public String getOverseerId() {
+    return ocmh.myId;
+  }
+
+  @Override
+  public Stats getOverseerStats() {
+    return ocmh.stats;
+  }
+
+
 }

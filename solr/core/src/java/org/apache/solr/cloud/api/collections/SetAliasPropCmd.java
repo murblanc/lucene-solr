@@ -30,7 +30,7 @@ import org.apache.solr.common.util.NamedList;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static org.apache.solr.cloud.api.collections.OverseerCollectionMessageHandler.Cmd;
+import static org.apache.solr.cloud.api.collections.CollectionHandlingUtils.Cmd;
 import static org.apache.solr.common.SolrException.ErrorCode.BAD_REQUEST;
 import static org.apache.solr.common.params.CommonParams.NAME;
 
@@ -40,17 +40,17 @@ public class SetAliasPropCmd implements Cmd {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
-  private final OverseerCollectionMessageHandler messageHandler;
+  private final CollectionCommandContext ccc;
 
-  SetAliasPropCmd(OverseerCollectionMessageHandler messageHandler) {
-    this.messageHandler = messageHandler;
+  public SetAliasPropCmd(CollectionCommandContext ccc) {
+    this.ccc = ccc;
   }
 
   @Override
   public void call(ClusterState state, ZkNodeProps message, @SuppressWarnings({"rawtypes"})NamedList results) throws Exception {
     String aliasName = message.getStr(NAME);
 
-    final ZkStateReader.AliasesManager aliasesManager = messageHandler.zkStateReader.aliasesManager;
+    final ZkStateReader.AliasesManager aliasesManager = ccc.getZkStateReader().aliasesManager;
 
     // Ensure we see the alias.  This may be redundant but SetAliasPropCmd isn't expected to be called very frequently
     aliasesManager.update();

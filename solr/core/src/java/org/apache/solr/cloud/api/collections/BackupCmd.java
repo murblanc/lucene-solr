@@ -31,7 +31,7 @@ import java.util.Optional;
 import java.util.Properties;
 
 import org.apache.lucene.util.Version;
-import org.apache.solr.cloud.api.collections.OverseerCollectionMessageHandler.ShardRequestTracker;
+import org.apache.solr.cloud.api.collections.CollectionHandlingUtils.ShardRequestTracker;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
 import org.apache.solr.common.cloud.ClusterState;
@@ -56,13 +56,13 @@ import org.apache.solr.handler.component.ShardHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class BackupCmd implements OverseerCollectionMessageHandler.Cmd {
+public class BackupCmd implements CollectionHandlingUtils.Cmd {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
-  private final OverseerCollectionMessageHandler ocmh;
+  private final CollectionCommandContext ccc;
 
-  public BackupCmd(OverseerCollectionMessageHandler ocmh) {
-    this.ocmh = ocmh;
+  public BackupCmd(CollectionCommandContext ccc) {
+    this.ccc = ccc;
   }
 
   @Override
@@ -71,7 +71,7 @@ public class BackupCmd implements OverseerCollectionMessageHandler.Cmd {
     boolean followAliases = message.getBool(FOLLOW_ALIASES, false);
     String collectionName;
     if (followAliases) {
-      collectionName = ocmh.cloudManager.getClusterStateProvider().resolveSimpleAlias(extCollectionName);
+      collectionName = ccc.getSolrCloudManager().getClusterStateProvider().resolveSimpleAlias(extCollectionName);
     } else {
       collectionName = extCollectionName;
     }
@@ -80,9 +80,9 @@ public class BackupCmd implements OverseerCollectionMessageHandler.Cmd {
 
     Instant startTime = Instant.now();
 
-    CoreContainer cc = ocmh.overseer.getCoreContainer();
+    CoreContainer cc = ccc.getCoreContainer();
     BackupRepository repository = cc.newBackupRepository(repo);
-    BackupManager backupMgr = new BackupManager(repository, ocmh.zkStateReader);
+    BackupManager backupMgr = new BackupManager(repository, ccc.getZkStateReader());
 
     // Backup location
     URI location = repository.createURI(message.getStr(CoreAdminParams.BACKUP_LOCATION));
@@ -110,12 +110,12 @@ public class BackupCmd implements OverseerCollectionMessageHandler.Cmd {
     log.info("Starting to backup ZK data for backupName={}", backupName);
 
     //Download the configs
-    String configName = ocmh.zkStateReader.readConfigName(collectionName);
+    String configName = ccc.getZkStateReader().readConfigName(collectionName);
     backupMgr.downloadConfigDir(location, backupName, configName);
 
     //Save the collection's state (coming from the collection's state.json)
     //We extract the state and back it up as a separate json
-    DocCollection collectionState = ocmh.zkStateReader.getClusterState().getCollection(collectionName);
+    DocCollection collectionState = ccc.getZkStateReader().getClusterState().getCollection(collectionName);
     backupMgr.writeCollectionState(location, backupName, collectionName, collectionState);
 
     Properties properties = new Properties();
@@ -170,12 +170,12 @@ public class BackupCmd implements OverseerCollectionMessageHandler.Cmd {
     String backupName = request.getStr(NAME);
     String asyncId = request.getStr(ASYNC);
     String repoName = request.getStr(CoreAdminParams.BACKUP_REPOSITORY);
-    ShardHandler shardHandler = ocmh.shardHandlerFactory.getShardHandler();
+    ShardHandler shardHandler = ccc.getShardHandler();
 
     String commitName = request.getStr(CoreAdminParams.COMMIT_NAME);
     Optional<CollectionSnapshotMetaData> snapshotMeta = Optional.empty();
     if (commitName != null) {
-      SolrZkClient zkClient = ocmh.zkStateReader.getZkClient();
+      SolrZkClient zkClient = ccc.getZkStateReader().getZkClient();
       snapshotMeta = SolrSnapshotManager.getCollectionLevelSnapshot(zkClient, collectionName, commitName);
       if (!snapshotMeta.isPresent()) {
         throw new SolrException(ErrorCode.BAD_REQUEST, "Snapshot with name " + commitName
@@ -195,8 +195,8 @@ public class BackupCmd implements OverseerCollectionMessageHandler.Cmd {
       shardsToConsider = snapshotMeta.get().getShards();
     }
 
-    final ShardRequestTracker shardRequestTracker = ocmh.asyncRequestTracker(asyncId);
-    for (Slice slice : ocmh.zkStateReader.getClusterState().getCollection(collectionName).getActiveSlices()) {
+    final ShardRequestTracker shardRequestTracker = CollectionHandlingUtils.asyncRequestTracker(asyncId, ccc);
+    for (Slice slice : ccc.getZkStateReader().getClusterState().getCollection(collectionName).getActiveSlices()) {
       Replica replica = null;
 
       if (snapshotMeta.isPresent()) {

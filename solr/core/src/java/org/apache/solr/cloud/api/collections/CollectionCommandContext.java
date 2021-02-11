@@ -19,6 +19,8 @@ package org.apache.solr.cloud.api.collections;
 
 import org.apache.solr.client.solrj.cloud.SolrCloudManager;
 import org.apache.solr.cloud.DistributedClusterChangeUpdater;
+import org.apache.solr.cloud.Stats;
+import org.apache.solr.common.SolrCloseable;
 import org.apache.solr.common.cloud.Replica;
 import org.apache.solr.common.cloud.ZkStateReader;
 import org.apache.solr.common.params.CommonParams;
@@ -29,6 +31,7 @@ import org.apache.zookeeper.KeeperException;
 import java.io.IOException;
 import java.util.Collection;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
 
 /**
  * Data passed to Collection and Config Set API command execution, to allow calls from either the {@link OverseerCollectionMessageHandler}
@@ -46,16 +49,18 @@ public interface CollectionCommandContext {
   CoreContainer getCoreContainer();
 
   // TODO move class away from OCMH (everything static anyway)
-  default OverseerCollectionMessageHandler.ShardRequestTracker asyncRequestTracker(String asyncId) {
-    return new OverseerCollectionMessageHandler.ShardRequestTracker(asyncId, getAdminPath(), getZkStateReader(), getShardHandler().getShardHandlerFactory());
+  default CollectionHandlingUtils.ShardRequestTracker asyncRequestTracker(String asyncId) {
+    return new CollectionHandlingUtils.ShardRequestTracker(asyncId, getAdminPath(), getZkStateReader(), getShardHandler().getShardHandlerFactory());
   }
 
   // ocmh.cleanupCollection can be redone with zkStateReader
 
-  void validateConfigOrThrowSolrException(String configName) throws IOException, KeeperException, InterruptedException;
+  default void validateConfigOrThrowSolrException(String configName) throws IOException, KeeperException, InterruptedException {
+    CollectionHandlingUtils.validateConfigOrThrowSolrException(getSolrCloudManager(), configName);
+  }
 
   default Map<String, Replica> waitToSeeReplicasInState(String collectionName, Collection<String> coreNames) throws InterruptedException {
-    return OverseerCollectionMessageHandler.waitToSeeReplicasInState(getZkStateReader(), getSolrCloudManager().getTimeSource(), collectionName, coreNames);
+    return CollectionHandlingUtils.waitToSeeReplicasInState(getZkStateReader(), getSolrCloudManager().getTimeSource(), collectionName, coreNames);
   }
 
   /**
@@ -73,4 +78,25 @@ public interface CollectionCommandContext {
     return CommonParams.CORES_HANDLER_PATH;
   }
 
+  SolrCloseable getCloseableToLatchOn();
+
+  ExecutorService getExecutorService();
+
+  boolean isDistributedCollectionAPI();
+
+  /**
+   * This method is not implemented in distributed Collection API mode and is not expected to be called when
+   * {@link #isDistributedCollectionAPI()} is {@code true}.
+   */
+  default String getOverseerId() {
+    throw new IllegalStateException("Bug! This default implementation should never be called");
+  }
+
+  /**
+   * This method is not implemented in distributed Collection API mode and is not expected to be called when
+   * {@link #isDistributedCollectionAPI()} is {@code true}.
+   */
+  default Stats getOverseerStats() {
+    throw new IllegalStateException("Bug! This default implementation should never be called");
+  }
 }
