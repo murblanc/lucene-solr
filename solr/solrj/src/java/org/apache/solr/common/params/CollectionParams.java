@@ -157,6 +157,10 @@ public interface CollectionParams {
     public String toLower() {
       return lowerName;
     }
+
+    public String toString() {
+      return lowerName;
+    }
   }
 
   Map<String, CollectionAction> actions = Collections.unmodifiableMap(

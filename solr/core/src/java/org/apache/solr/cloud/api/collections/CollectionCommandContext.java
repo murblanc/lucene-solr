@@ -37,6 +37,11 @@ import java.util.concurrent.ExecutorService;
  * distributed way, unrelated to and not depending upon Overseer abstractions (including overseer collection message handling).
  */
 public interface CollectionCommandContext {
+  /**
+   * When this method returns {@code true}, Overseer specific actions do not make sense and commands should not be doing them.
+   */
+  boolean isDistributedCollectionAPI();
+
   ShardHandler getShardHandler();
 
   SolrCloudManager getSolrCloudManager();

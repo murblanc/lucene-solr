@@ -28,7 +28,6 @@ import org.apache.solr.client.solrj.request.CollectionAdminRequest;
 import org.apache.solr.client.solrj.request.CoreAdminRequest.RequestSyncShard;
 import org.apache.solr.client.solrj.response.RequestStatusState;
 import org.apache.solr.client.solrj.util.SolrIdentifierValidator;
-import org.apache.solr.cloud.DistributedClusterStateUpdater;
 import org.apache.solr.cloud.OverseerSolrResponse;
 import org.apache.solr.cloud.OverseerSolrResponseSerializer;
 import org.apache.solr.cloud.OverseerTaskQueue;
@@ -36,6 +35,7 @@ import org.apache.solr.cloud.OverseerTaskQueue.QueueEvent;
 import org.apache.solr.cloud.ZkController;
 import org.apache.solr.cloud.ZkController.NotInClusterStateException;
 import org.apache.solr.cloud.ZkShardTerms;
+import org.apache.solr.cloud.api.collections.DistributedCollectionCommandRunner;
 import org.apache.solr.cloud.api.collections.ReindexCollectionCmd;
 import org.apache.solr.cloud.api.collections.RoutedAlias;
 import org.apache.solr.cloud.overseer.SliceMutator;
@@ -99,6 +99,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -137,7 +138,7 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
 
   protected final CoreContainer coreContainer;
   private final CollectionHandlerApi v2Handler;
-  private final DistributedClusterStateUpdater distributedClusterStateUpdater;
+  private final Optional<DistributedCollectionCommandRunner> distributedCollectionCommandRunner;
 
   public CollectionsHandler() {
     // Unlike most request handlers, CoreContainer initialization
@@ -154,16 +155,16 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
   public CollectionsHandler(final CoreContainer coreContainer) {
     this.coreContainer = coreContainer;
     v2Handler = new CollectionHandlerApi(this);
-    // Get the state change factory to know if need to enqueue to Overseer or process distributed.
     // Some SolrCloud tests do not need Zookeeper and end up with a null cloudConfig in NodeConfig (because
     // TestHarness.buildTestNodeConfig() uses the zkHost to decide it's SolrCloud).
-    // These tests do not use Zookeeper and do not do state updates (see subclasses of TestBaseStatsCacheCloud).
+    // These tests do not use Zookeeper and do not do Collection API or state updates (see subclasses of TestBaseStatsCacheCloud).
     // Some non SolrCloud tests do not even pass a config at all, so let be cautious here (code is not pretty).
     // We do want to initialize here and not do it lazy to not deal with synchronization for actual prod code.
-    if (coreContainer == null || coreContainer.getConfig() == null || coreContainer.getConfig().getCloudConfig() == null) {
-      distributedClusterStateUpdater = null;
+    if (coreContainer == null || coreContainer.getConfig() == null || coreContainer.getConfig().getCloudConfig() == null ||
+        !coreContainer.getConfig().getCloudConfig().getDistributedCollectionConfigSetExecution()) {
+      distributedCollectionCommandRunner = Optional.empty();
     } else {
-      distributedClusterStateUpdater = new DistributedClusterStateUpdater(coreContainer.getConfig().getCloudConfig().getDistributedClusterStateUpdates());
+      distributedCollectionCommandRunner = Optional.of(new DistributedCollectionCommandRunner(this.coreContainer));
     }
   }
 
@@ -179,7 +180,7 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
   }
 
   @Override
-  final public void init(@SuppressWarnings({"rawtypes"})NamedList args) {
+  final public void init(@SuppressWarnings({"rawtypes"}) NamedList args) {
 
   }
 
@@ -259,7 +260,21 @@ public class CollectionsHandler extends RequestHandlerBase implements Permission
     props.put(QUEUE_OPERATION, operation.action.toLower());
 
     ZkNodeProps zkProps = new ZkNodeProps(props);
-    SolrResponse overseerResponse = sendToOCPQueue(zkProps, operation.timeOut);
+    final SolrResponse overseerResponse;
+
+    // Collection API messages are either sent to Overseer and processed there, or processed locally.
+    // Distribution Collection API implies we're also distributing Cluster State Updates. Indeed non distributed Collection API
+    // collection creation requires to be running in same JVM as cluster state updater for Per Replica States collections.
+    // The configuration handling includes these checks.
+    if (distributedCollectionCommandRunner.isEmpty()) {
+      overseerResponse = sendToOCPQueue(zkProps, operation.timeOut);
+    } else {
+      if (log.isInfoEnabled()) {
+        log.info("Running Collection API locally for " + operation.name()); // nowarn
+      }
+      overseerResponse = distributedCollectionCommandRunner.get().runApiCommand(zkProps, operation.action);
+    }
+
     rsp.getValues().addAll(overseerResponse.getResponse());
     Exception exp = overseerResponse.getException();
     if (exp != null) {

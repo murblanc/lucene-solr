@@ -21,81 +21,66 @@ import java.util.concurrent.ExecutorService;
 
 import org.apache.solr.client.solrj.cloud.SolrCloudManager;
 import org.apache.solr.cloud.DistributedClusterStateUpdater;
-import org.apache.solr.cloud.Overseer;
-import org.apache.solr.cloud.Stats;
 import org.apache.solr.common.SolrCloseable;
 import org.apache.solr.common.cloud.ZkStateReader;
 import org.apache.solr.core.CoreContainer;
 import org.apache.solr.handler.component.ShardHandler;
-import org.apache.zookeeper.KeeperException;
 
-/**
- * Context passed to Collection API commands when they execute in the Overseer.
- */
-public class OcmhCollectionCommandContext implements CollectionCommandContext {
-  private final OverseerCollectionMessageHandler ocmh;
+public class DistributedCollectionCommandContext implements CollectionCommandContext {
+  private final ShardHandler shardHandler;
+  private final SolrCloudManager solrCloudManager;
+  private final CoreContainer coreContainer;
+  private final ZkStateReader zkStateReader;
+  private final DistributedClusterStateUpdater getDistributedClusterStateUpdater;
+  private final ExecutorService executorService;
 
-  public OcmhCollectionCommandContext(OverseerCollectionMessageHandler ocmh) {
-    this.ocmh = ocmh;
+  public DistributedCollectionCommandContext(CoreContainer coreContainer, ExecutorService executorService) {
+    this.shardHandler = coreContainer.getShardHandlerFactory().getShardHandler();;
+    this.solrCloudManager = coreContainer.getZkController().getSolrCloudManager();
+    this.coreContainer = coreContainer;
+    this.zkStateReader = coreContainer.getZkController().getZkStateReader();
+    this.getDistributedClusterStateUpdater = new DistributedClusterStateUpdater(coreContainer.getConfig().getCloudConfig().getDistributedClusterStateUpdates());;
+    this.executorService = executorService;
   }
 
   @Override
-  public  boolean isDistributedCollectionAPI() {
-    return false;
+  public boolean isDistributedCollectionAPI() {
+    return true;
   }
 
   @Override
   public ShardHandler getShardHandler() {
-    return ocmh.shardHandlerFactory.getShardHandler();
+    return this.shardHandler;
   }
 
   @Override
   public SolrCloudManager getSolrCloudManager() {
-    return ocmh.cloudManager;
+    return this.solrCloudManager;
   }
 
   @Override
   public CoreContainer getCoreContainer() {
-    return ocmh.overseer.getCoreContainer();
+    return this.coreContainer;
   }
 
   @Override
   public ZkStateReader getZkStateReader() {
-    return ocmh.zkStateReader;
+    return this.zkStateReader;
   }
 
   @Override
   public DistributedClusterStateUpdater getDistributedClusterStateUpdater() {
-    return ocmh.overseer.getDistributedClusterStateUpdater();
-  }
-
-  @Override
-  public void offerStateUpdate(byte[] data) throws KeeperException, InterruptedException {
-    ocmh.overseer.offerStateUpdate(data);
+    return this.getDistributedClusterStateUpdater;
   }
 
   @Override
   public SolrCloseable getCloseableToLatchOn() {
-    return ocmh;
+    // Debatable: SolrCloudManager instance is tracked for closing to interrupt some command execution. Could very well monitor something else.
+    return this.solrCloudManager;
   }
 
   @Override
   public ExecutorService getExecutorService() {
-    return ocmh.tpe;
-  }
-
-  @Override
-  public String getOverseerId() {
-    return ocmh.myId;
-  }
-
-  @Override
-  public Stats getOverseerStats() {
-    return ocmh.stats;
-  }
-
-  @Override
-  public void submitIntraProcessMessage(Overseer.Message message) {
-    ocmh.overseer.submit(message);
+    return this.executorService;
   }
 }
