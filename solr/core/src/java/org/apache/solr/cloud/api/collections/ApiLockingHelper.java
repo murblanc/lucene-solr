@@ -47,7 +47,8 @@ public class ApiLockingHelper {
    *
    * @return the required locks that once all are {@link DistributedLock#isAcquired()} guarantee the corresponding Collection
    * API command can execute safely. If they're going to be {@link DistributedLock#waitUntilAcquired()} (which will be the case
-   * except in some tests) the calls <b>must be done</b> in the returned list order, otherwise deadlock risk.
+   * except in some tests) the calls <b>must be done</b> in the returned list order, otherwise deadlock risk ({@link #waitUntilAcquiredLocks}
+   * will handle that).
    * Returned locks <b>MUST</b> be {@link DistributedLock#release()} no matter what once no longer needed as they prevent
    * other threads from locking  ({@link #releaseLocks} will handle that).
    */
@@ -78,6 +79,12 @@ public class ApiLockingHelper {
     }
 
     return locks;
+  }
+
+  void waitUntilAcquiredLocks(List<DistributedLock> locks) {
+    for (DistributedLock lock : locks) {
+      lock.waitUntilAcquired();
+    }
   }
 
 

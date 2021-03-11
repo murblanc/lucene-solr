@@ -18,11 +18,14 @@
 package org.apache.solr.cloud;
 
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.WatchedEvent;
+import org.apache.zookeeper.Watcher;
 
 import static org.apache.solr.common.SolrException.ErrorCode.SERVER_ERROR;
 
@@ -88,8 +91,58 @@ abstract class ZkDistributedLock implements DistributedLock {
     sequence = getSequenceFromNodename(lockNode);
   }
 
+  private static class DeletedNodeWatcher implements Watcher {
+    final CountDownLatch latch;
+    final String nodeBeingWatched;
+    String errorMessage = null; // non null means error
+
+    DeletedNodeWatcher(String nodeBeingWatched) {
+      this.latch = new CountDownLatch(1);
+      this.nodeBeingWatched = nodeBeingWatched;
+    }
+
+    @Override
+    public void process(WatchedEvent event) {
+      if (event.getType() == Event.EventType.None) {
+        return;
+      } else if (event.getType() != Event.EventType.NodeDeleted) {
+        synchronized (this) {
+          errorMessage = "Received unexpected watch event " + event.getType() + " on " + nodeBeingWatched;
+        }
+      }
+      latch.countDown();
+    }
+
+    void await() throws InterruptedException {
+      latch.await();
+      synchronized (this) {
+        if (errorMessage != null) {
+          throw new SolrException(SERVER_ERROR, errorMessage);
+        }
+      }
+    }
+  }
+
   @Override
   public void waitUntilAcquired() {
+    try {
+      if (released) {
+        throw new IllegalStateException("Bug. waitUntilAcquired() should not be called after release(). " + lockNode);
+      }
+      String nodeToWatch = nodeToWatch();
+      while (nodeToWatch != null) {
+        final DeletedNodeWatcher watcher = new DeletedNodeWatcher(nodeToWatch);
+        if (zkClient.exists(nodeToWatch, watcher, true) != null) {
+          watcher.await();
+        }
+        nodeToWatch = nodeToWatch();
+      }
+    } catch (KeeperException e) {
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, e);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, e);
+    }
   }
 
   @Override
