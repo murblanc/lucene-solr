@@ -67,7 +67,7 @@ public class ZkDistributedLockTest extends SolrTestCaseJ4 {
     }
   }
 
-  private void monothreadedTests(DistributedLockFactory factory) throws Exception {
+  private void monothreadedTests(DistributedLockFactory factory) {
     // Collection level locks
     DistributedLock collRL1 = factory.createLock(false, CollectionParams.LockLevel.COLLECTION, COLLECTION_NAME, null, null);
     assertTrue("collRL1 should have been acquired", collRL1.isAcquired());

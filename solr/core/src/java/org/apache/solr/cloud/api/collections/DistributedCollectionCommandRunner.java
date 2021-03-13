@@ -18,12 +18,10 @@
 package org.apache.solr.cloud.api.collections;
 
 import java.lang.invoke.MethodHandles;
-import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.solr.cloud.DistributedLock;
 import org.apache.solr.cloud.OverseerSolrResponse;
 import org.apache.solr.cloud.ZkDistributedLockFactory;
 import org.apache.solr.common.SolrException;
@@ -58,7 +56,7 @@ public class DistributedCollectionCommandRunner {
   private final CoreContainer coreContainer;
   final private CollApiCmds.CommandMap commandMapper;
   private final CollectionCommandContext ccc;
-  private final ApiLockingHelper apiLockingHelper;
+  private final ApiLockFactory apiLockingFactory;
 
   public DistributedCollectionCommandRunner(CoreContainer coreContainer) {
     this.coreContainer = coreContainer;
@@ -74,7 +72,7 @@ public class DistributedCollectionCommandRunner {
     ccc = new DistributedCollectionCommandContext(this.coreContainer, this.distributedCollectionApiExecutorService);
     commandMapper = new CollApiCmds.CommandMap(ccc);
 
-    apiLockingHelper = new ApiLockingHelper(new ZkDistributedLockFactory(ccc.getZkStateReader().getZkClient()));
+    apiLockingFactory = new ApiLockFactory(new ZkDistributedLockFactory(ccc.getZkStateReader().getZkClient()));
   }
 
   /**
@@ -103,26 +101,23 @@ public class DistributedCollectionCommandRunner {
     MDCLoggingContext.setShard(shardId);
     MDCLoggingContext.setReplica(replicaName);
 
-    // Create locks for executing the command. This call is non blocking (not on waiting for a lock anyway)
-    List<DistributedLock> locks = apiLockingHelper.getCollectionApiLocks(action.lockLevel, collName, shardId, replicaName);
+    // Create API lock for executing the command. This call is non blocking (not blocked on waiting for a lock to be acquired anyway,
+    // might be blocked on access to ZK etc)
+    ApiLockFactory.ApiLock lock = apiLockingFactory.createCollectionApiLock(action.lockLevel, collName, shardId, replicaName);
 
-    log.debug("DistributedCollectionCommandRunner.runApiCommand. About to acquire locks for action {} lock level {}. {}/{}/{}",
+    log.debug("DistributedCollectionCommandRunner.runApiCommand. About to acquire lock for action {} lock level {}. {}/{}/{}",
         action, action.lockLevel, collName, shardId, replicaName);
 
     // Block this thread until all required locks are acquired.
     // This thread is either a CollectionsHandler thread and a client is waiting for a response, or this thread comes from a pool (WHERE?) and is running an async task.
-    for (DistributedLock lock : locks) {
-      log.debug("DistributedCollectionCommandRunner.runApiCommand. About to acquire lock {}", lock);
-      lock.waitUntilAcquired();
-      log.debug("DistributedCollectionCommandRunner.runApiCommand. Acquired lock {}", lock);
-    }
+    lock.waitUntilAcquired();
 
     // TODO handle async tasks... Before and after command call
     // Note async tasks will be executed in the order enqueued on a node (no guarantees for enqueues on different nodes)
     // But async vs non async task, no guarantees either. The non async task might get executed first. So when combining both
     // should document that need to wait for completion first (if order matters)
 
-    log.debug("DistributedCollectionCommandRunner.runApiCommand. Locks acquired. Calling: {}, {}", action, message);
+    log.debug("DistributedCollectionCommandRunner.runApiCommand. Lock acquired. Calling: {}, {}", action, message);
 
     @SuppressWarnings({"rawtypes"})
     NamedList results = new NamedList();
@@ -148,9 +143,7 @@ public class DistributedCollectionCommandRunner {
       nl.add("rspCode", e instanceof SolrException ? ((SolrException)e).code() : -1);
       results.add("exception", nl);
     } finally {
-      for (DistributedLock dl : locks) {
-        dl.release();
-      }
+      lock.release();
     }
     return new OverseerSolrResponse(results);
   }

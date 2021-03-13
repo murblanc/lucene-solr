@@ -18,10 +18,9 @@
 package org.apache.solr.cloud.api.collections;
 
 import java.nio.file.Path;
-import java.util.List;
+import java.util.concurrent.CountDownLatch;
 
 import org.apache.solr.SolrTestCaseJ4;
-import org.apache.solr.cloud.DistributedLock;
 import org.apache.solr.cloud.ZkDistributedLockFactory;
 import org.apache.solr.cloud.ZkTestServer;
 import org.apache.solr.common.SolrException;
@@ -39,89 +38,125 @@ public class ApiLockingTest  extends SolrTestCaseJ4 {
 
   static final int TIMEOUT = 10000;
 
-
   /**
-   * Tests the multi locking needed for Collection API command execution
+   * Tests the Collection API locking. All tests run from single test method to save on setup time.
    */
   @Test
-  public void testCollectionApiLockHierarchy() throws Exception {
+  public void monothreadedApiLockTests() throws Exception {
     Path zkDir = createTempDir("zkData");
 
     ZkTestServer server = new ZkTestServer(zkDir);
     try {
       server.run();
       try (SolrZkClient zkClient = new SolrZkClient(server.getZkAddress(), TIMEOUT)) {
-        ApiLockingHelper apiLockingHelper = new ApiLockingHelper(new ZkDistributedLockFactory(zkClient));
+        ApiLockFactory apiLockFactory = new ApiLockFactory(new ZkDistributedLockFactory(zkClient));
 
         try {
-          apiLockingHelper.getCollectionApiLocks(CollectionParams.LockLevel.COLLECTION, COLLECTION_NAME, null, null);
+          apiLockFactory.createCollectionApiLock(CollectionParams.LockLevel.COLLECTION, COLLECTION_NAME, null, null);
           fail("Collection does not exist, lock creation should have failed");
         } catch (SolrException expected) {
         }
 
         zkClient.makePath(ZkStateReader.COLLECTIONS_ZKNODE + "/" + COLLECTION_NAME, null, CreateMode.PERSISTENT, true);
 
-        // Lock at collection level (which prevents locking + acquiring on any other level of the hierarchy)
-        List<DistributedLock> collLocks = apiLockingHelper.getCollectionApiLocks(CollectionParams.LockLevel.COLLECTION, COLLECTION_NAME, null, null);
-        assertTrue("Collection should have been acquired", isAcquired(collLocks));
-        assertEquals("Lock at collection level expected to need one distributed lock", 1, collLocks.size());
-
-        // Request a shard lock. Will not be acquired as long as we don't release the collection lock above
-        List<DistributedLock> shard1Locks = apiLockingHelper.getCollectionApiLocks(CollectionParams.LockLevel.SHARD, COLLECTION_NAME, SHARD1_NAME, null);
-        assertFalse("Shard1 should not have been acquired", isAcquired(shard1Locks));
-        assertEquals("Lock at shard level expected to need two distributed locks", 2, shard1Locks.size());
-
-        // Request a lock on another shard. Will not be acquired as long as we don't release the collection lock above
-        List<DistributedLock> shard2Locks = apiLockingHelper.getCollectionApiLocks(CollectionParams.LockLevel.SHARD, COLLECTION_NAME, SHARD2_NAME, null);
-        assertFalse("Shard2 should not have been acquired", isAcquired(shard2Locks));
-
-        assertTrue("Collection should still be acquired", isAcquired(collLocks));
-
-        apiLockingHelper.releaseLocks(collLocks);
-
-        assertTrue("Shard1 should have been acquired now that collection lock released", isAcquired(shard1Locks));
-        assertTrue("Shard2 should have been acquired now that collection lock released", isAcquired(shard2Locks));
-
-        // Request a lock on replica of shard1
-        List<DistributedLock> replicaShard1Locks = apiLockingHelper.getCollectionApiLocks(CollectionParams.LockLevel.SHARD, COLLECTION_NAME, SHARD1_NAME, REPLICA_NAME);
-        assertFalse("replicaShard1Locks should not have been acquired, shard1 is locked", isAcquired(replicaShard1Locks));
-
-        // Now ask for a new lock on the collection
-        collLocks = apiLockingHelper.getCollectionApiLocks(CollectionParams.LockLevel.COLLECTION, COLLECTION_NAME, null, null);
-
-        assertFalse("Collection should not have been acquired, shard1 and shard2 locks preventing it", isAcquired(collLocks));
-
-        apiLockingHelper.releaseLocks(shard1Locks);
-        assertTrue("replicaShard1Locks should have been acquired, as shard1 got released", isAcquired(replicaShard1Locks));
-        assertFalse("Collection should not have been acquired, shard2 lock is preventing it", isAcquired(collLocks));
-
-        apiLockingHelper.releaseLocks(replicaShard1Locks);
-
-        // Request a lock on replica of shard2
-        List<DistributedLock> replicaShard2Locks = apiLockingHelper.getCollectionApiLocks(CollectionParams.LockLevel.SHARD, COLLECTION_NAME, SHARD2_NAME, REPLICA_NAME);
-        assertFalse("replicaShard2Locks should not have been acquired, shard2 is locked", isAcquired(replicaShard2Locks));
-
-        apiLockingHelper.releaseLocks(shard2Locks);
-
-        assertTrue("Collection should have been acquired as shard2 got released and replicaShard2Locks was requested after the collection lock", isAcquired(collLocks));
-        assertFalse("replicaShard2Locks should not have been acquired, collLocks is locked", isAcquired(replicaShard2Locks));
-
-        apiLockingHelper.releaseLocks(collLocks);
-        assertTrue("replicaShard2Locks should have been acquired, the collection lock got released", isAcquired(replicaShard2Locks));
+        monothreadedTests(apiLockFactory);
+        multithreadedTests(apiLockFactory);
       }
     } finally {
       server.shutdown();
     }
   }
 
-  private boolean isAcquired(List<DistributedLock> locks) {
-    for (DistributedLock lock : locks) {
-      if (!lock.isAcquired()) {
-        return false;
-      }
-    }
-    return true;
+  private void monothreadedTests(ApiLockFactory apiLockingHelper) throws Exception {
+    // Lock at collection level (which prevents locking + acquiring on any other level of the hierarchy)
+    ApiLockFactory.ApiLock collLock = apiLockingHelper.createCollectionApiLock(CollectionParams.LockLevel.COLLECTION, COLLECTION_NAME, null, null);
+    assertTrue("Collection should have been acquired", collLock.isAcquired());
+    assertEquals("Lock at collection level expected to need one distributed lock", 1, collLock.getCountInternalLocks());
+
+    // Request a shard lock. Will not be acquired as long as we don't release the collection lock above
+    ApiLockFactory.ApiLock shard1Lock = apiLockingHelper.createCollectionApiLock(CollectionParams.LockLevel.SHARD, COLLECTION_NAME, SHARD1_NAME, null);
+    assertFalse("Shard1 should not have been acquired", shard1Lock.isAcquired());
+    assertEquals("Lock at shard level expected to need two distributed locks", 2, shard1Lock.getCountInternalLocks());
+
+    // Request a lock on another shard. Will not be acquired as long as we don't release the collection lock above
+    ApiLockFactory.ApiLock shard2Lock = apiLockingHelper.createCollectionApiLock(CollectionParams.LockLevel.SHARD, COLLECTION_NAME, SHARD2_NAME, null);
+    assertFalse("Shard2 should not have been acquired", shard2Lock.isAcquired());
+
+    assertTrue("Collection should still be acquired", collLock.isAcquired());
+
+    collLock.release();
+
+    assertTrue("Shard1 should have been acquired now that collection lock released", shard1Lock.isAcquired());
+    assertTrue("Shard2 should have been acquired now that collection lock released", shard2Lock.isAcquired());
+
+    // Request a lock on replica of shard1
+    ApiLockFactory.ApiLock replicaShard1Lock = apiLockingHelper.createCollectionApiLock(CollectionParams.LockLevel.SHARD, COLLECTION_NAME, SHARD1_NAME, REPLICA_NAME);
+    assertFalse("replicaShard1Lock should not have been acquired, shard1 is locked", replicaShard1Lock.isAcquired());
+
+    // Now ask for a new lock on the collection
+    collLock = apiLockingHelper.createCollectionApiLock(CollectionParams.LockLevel.COLLECTION, COLLECTION_NAME, null, null);
+
+    assertFalse("Collection should not have been acquired, shard1 and shard2 locks preventing it", collLock.isAcquired());
+
+    shard1Lock.release();
+    assertTrue("replicaShard1Lock should have been acquired, as shard1 got released", replicaShard1Lock.isAcquired());
+    assertFalse("Collection should not have been acquired, shard2 lock is preventing it", collLock.isAcquired());
+
+    replicaShard1Lock.release();
+
+    // Request a lock on replica of shard2
+    ApiLockFactory.ApiLock replicaShard2Lock = apiLockingHelper.createCollectionApiLock(CollectionParams.LockLevel.SHARD, COLLECTION_NAME, SHARD2_NAME, REPLICA_NAME);
+    assertFalse("replicaShard2Lock should not have been acquired, shard2 is locked", replicaShard2Lock.isAcquired());
+
+    shard2Lock.release();
+
+    assertTrue("Collection should have been acquired as shard2 got released and replicaShard2Locks was requested after the collection lock", collLock.isAcquired());
+    assertFalse("replicaShard2Lock should not have been acquired, collLock is locked", replicaShard2Lock.isAcquired());
+
+    collLock.release();
+    assertTrue("replicaShard2Lock should have been acquired, the collection lock got released", replicaShard2Lock.isAcquired());
+
+    // Release remaining lock to allow the multithreaded locking to succeed
+    replicaShard2Lock.release();
   }
 
+  private void multithreadedTests(ApiLockFactory apiLockingHelper) throws Exception {
+    // Lock on collection...
+    ApiLockFactory.ApiLock collLock = apiLockingHelper.createCollectionApiLock(CollectionParams.LockLevel.COLLECTION, COLLECTION_NAME, null, null);
+    assertTrue("Collection should have been acquired", collLock.isAcquired());
+
+    // ...blocks a lock on replica from being acquired
+    final ApiLockFactory.ApiLock replicaShard1Lock = apiLockingHelper.createCollectionApiLock(CollectionParams.LockLevel.SHARD, COLLECTION_NAME, SHARD1_NAME, REPLICA_NAME);
+    assertFalse("replicaShard1Lock should not have been acquired, because collection is locked", replicaShard1Lock.isAcquired());
+
+    // Wait for acquisition of the replica lock on another thread (and be notified via a latch)
+    final CountDownLatch latch = new CountDownLatch(1);
+    new Thread(() -> {
+      replicaShard1Lock.waitUntilAcquired();
+      // countDown() will not be called if waitUntilAcquired() threw exception of any kind
+      latch.countDown();
+    }).start();
+
+    // Wait for the thread to start and to get blocked in waitUntilAcquired()
+    // (thread start could have been checked more reliably using another latch, and verifying the thread is in waitUntilAcquired
+    // done through that thread stacktrace, but that would be overkill compared to the very slight race condition of waiting 30ms,
+    // but a race that would not cause the test to fail since we're testing... that nothing happened yet).
+    Thread.sleep(30);
+
+    assertEquals("we should not have been notified that replica was acquired", 1, latch.getCount());
+    assertFalse("replica lock should not have been acquired", replicaShard1Lock.isAcquired());
+
+    collLock.release();
+    assertTrue("replica lock should have been acquired now that collection lock was released", replicaShard1Lock.isAcquired());
+
+    // Wait for the Zookeeper watch to fire + the thread to be unblocked and countdown the latch
+    // We'll wait up to 10 seconds here, so should be safe even if GC is extraordinarily high with a pause
+    int i = 0;
+    while (i < 1000 && latch.getCount() != 0) {
+      Thread.sleep(10);
+      i++;
+    }
+    assertEquals("we should have been notified that replica lock was acquired", 0, latch.getCount());
+  }
 
 }
